@@ -1,11 +1,12 @@
 # ============================================================
-# GoldTrader Pro — FastAPI Backend  v4.1.1
+# GoldTrader Pro — FastAPI Backend  v4.1.2
 # Taxly India Private Limited
 # ============================================================
 
-from fastapi import FastAPI
+import logging
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, HTMLResponse
+from fastapi.responses import FileResponse, JSONResponse
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -19,71 +20,99 @@ from routers import (
 )
 import models  # noqa: F401
 
-BASE_DIR     = Path(__file__).resolve().parent          # .../backend/
-FRONTEND_DIR = BASE_DIR.parent / "frontend"             # .../frontend/
+# ── Logging setup ─────────────────────────────────────────────────────────────
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+)
+logger = logging.getLogger("gt")
+
+BASE_DIR     = Path(__file__).resolve().parent
+FRONTEND_DIR = BASE_DIR.parent / "frontend"
 INDEX_HTML   = FRONTEND_DIR / "index.html"
 
 
-# ── DB startup migrations ─────────────────────────────────────────────────────
+# ── DB startup ────────────────────────────────────────────────────────────────
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
+    logger.info("Starting up GoldTrader Pro v4.1.2...")
+    try:
+        async with engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
 
-        # Add polish_charges column if missing (v4.2 migration)
-        await conn.execute(text("""
-            DO $$ BEGIN
-                IF NOT EXISTS (
-                    SELECT 1 FROM information_schema.columns
-                    WHERE table_name='invoice_items' AND column_name='polish_charges'
-                ) THEN
-                    ALTER TABLE invoice_items ADD COLUMN polish_charges NUMERIC(15,2) NOT NULL DEFAULT 0;
-                END IF;
-            END $$;
-        """))
-
-        # Add extra tenant profile columns if missing (v4.3 migration)
-        await conn.execute(text("""
-            DO $$ DECLARE col TEXT; BEGIN
-                FOREACH col IN ARRAY ARRAY[
-                    'pan','upi_id','qr_code_url','bank_name',
-                    'bank_account_no','bank_ifsc','bank_branch',
-                    'terms_conditions','authorised_person'
-                ] LOOP
+            await conn.execute(text("""
+                DO $$ BEGIN
                     IF NOT EXISTS (
                         SELECT 1 FROM information_schema.columns
-                        WHERE table_name='tenants' AND column_name=col
+                        WHERE table_name='invoice_items' AND column_name='polish_charges'
                     ) THEN
-                        EXECUTE format('ALTER TABLE tenants ADD COLUMN %I TEXT', col);
+                        ALTER TABLE invoice_items
+                            ADD COLUMN polish_charges NUMERIC(15,2) NOT NULL DEFAULT 0;
                     END IF;
-                END LOOP;
-            END $$;
-        """))
+                END $$;
+            """))
+
+            await conn.execute(text("""
+                DO $$ DECLARE col TEXT; BEGIN
+                    FOREACH col IN ARRAY ARRAY[
+                        'pan','upi_id','qr_code_url','bank_name',
+                        'bank_account_no','bank_ifsc','bank_branch',
+                        'terms_conditions','authorised_person'
+                    ] LOOP
+                        IF NOT EXISTS (
+                            SELECT 1 FROM information_schema.columns
+                            WHERE table_name='tenants' AND column_name=col
+                        ) THEN
+                            EXECUTE format('ALTER TABLE tenants ADD COLUMN %I TEXT', col);
+                        END IF;
+                    END LOOP;
+                END $$;
+            """))
+
+        logger.info("Database ready.")
+    except Exception as e:
+        logger.error(f"DB startup error: {e}")
 
     yield
     await engine.dispose()
+    logger.info("Shutdown complete.")
 
 
 # ── App ───────────────────────────────────────────────────────────────────────
 app = FastAPI(
     title="GoldTrader Pro API",
-    description="Jewellery business management — GST, TCS, SFT, FIFO",
-    version="4.1.1",
+    description="Jewellery business management",
+    version="4.1.2",
     lifespan=lifespan,
+    redirect_slashes=False,   # ← CRITICAL: prevent 307 redirects that convert POST→GET
 )
 
 
-# ── Security Headers — pure ASGI (safe: never buffers response body) ─────────
+# ── Request logger middleware ─────────────────────────────────────────────────
+# Logs every request + response status to Render.com logs.
+# Check Render dashboard → Logs to see what's happening with each request.
+
+@app.middleware("http")
+async def log_requests(request: Request, call_next):
+    logger.info(f"→ {request.method} {request.url.path}  origin={request.headers.get('origin','same-origin')}")
+    try:
+        response = await call_next(request)
+        logger.info(f"← {response.status_code} {request.method} {request.url.path}")
+        return response
+    except Exception as e:
+        logger.error(f"✗ {request.method} {request.url.path} — {e}")
+        raise
+
+
+# ── Security Headers — pure ASGI, no body buffering ──────────────────────────
 #
-# WHY NOT BaseHTTPMiddleware:
-#   Starlette's BaseHTTPMiddleware buffers the entire HTTPException response body
-#   before forwarding it. Small error responses (401/403/409 JSON payloads) are
-#   consumed and re-emitted incorrectly, resulting in EMPTY bodies reaching the
-#   browser. The browser's res.json() then fails → data={} → detail=undefined →
-#   the frontend shows "Request failed (HTTP 4xx)" with no meaningful text.
+# DO NOT use BaseHTTPMiddleware here. It has a critical Starlette bug:
+# BaseHTTPMiddleware buffers HTTPException response bodies, causing the body
+# to be delivered EMPTY to clients. This makes all 401/403/409 error details
+# invisible to the frontend — res.json() returns {} → detail=undefined.
 #
-# This pure ASGI class only hooks into http.response.start (the headers event)
-# and passes all other events (body chunks) through completely untouched.
+# This pure ASGI implementation only touches http.response.start (headers).
+# The body passes through completely untouched.
 
 class SecurityHeadersMiddleware:
     _HEADERS = [
@@ -102,7 +131,7 @@ class SecurityHeadersMiddleware:
             await self.app(scope, receive, send)
             return
 
-        async def send_with_security_headers(message):
+        async def send_with_headers(message):
             if message["type"] == "http.response.start":
                 headers = list(message.get("headers", []))
                 existing = {h[0].lower() for h in headers}
@@ -112,30 +141,21 @@ class SecurityHeadersMiddleware:
                 message = {**message, "headers": headers}
             await send(message)
 
-        await self.app(scope, receive, send_with_security_headers)
+        await self.app(scope, receive, send_with_headers)
 
 
 app.add_middleware(SecurityHeadersMiddleware)
 
 
 # ── CORS ──────────────────────────────────────────────────────────────────────
-#
-# RULE: allow_credentials=True is INCOMPATIBLE with allow_origins=["*"].
-#   Pairing them causes the browser to reject ALL cross-origin responses
-#   with a CORS error — showing as 403 with an empty body.
-#
-# This app authenticates via Bearer tokens in the Authorization header (not cookies).
-# Bearer tokens are explicit headers — they work fine with allow_origins=["*"]
-# and allow_credentials=False. No credentials mode needed.
-#
-# When FRONTEND_URL is set to an explicit domain (production), credentials are
-# enabled so future cookie-based features work without code changes.
+# Bearer token auth does NOT need allow_credentials=True.
+# allow_credentials=True + allow_origins=["*"] is ILLEGAL (browser rejects it).
 
 _DEV_ORIGINS = [
     "http://localhost",
     "http://localhost:3000",
     "http://localhost:8000",
-    "http://localhost:5500",   # VS Code Live Server
+    "http://localhost:5500",
     "http://127.0.0.1",
     "http://127.0.0.1:8000",
     "http://127.0.0.1:5500",
@@ -146,7 +166,7 @@ _wildcard   = not _configured or _configured == ["*"]
 
 if _wildcard:
     _ALLOW_ORIGINS     = ["*"]
-    _ALLOW_CREDENTIALS = False   # MUST be False when origins=["*"] — browser enforced
+    _ALLOW_CREDENTIALS = False
 else:
     _ALLOW_ORIGINS     = list(dict.fromkeys(_configured + _DEV_ORIGINS))
     _ALLOW_CREDENTIALS = True
@@ -160,36 +180,35 @@ app.add_middleware(
     expose_headers=["X-Action"],
 )
 
+logger.info(f"CORS origins: {_ALLOW_ORIGINS}")
+logger.info(f"CORS credentials: {_ALLOW_CREDENTIALS}")
 
-# ── Health / Diagnostic routes (registered FIRST — before all other routes) ──
-#
-# IMPORTANT: These must be registered before the API routers AND before the
-# catch-all /{full_path:path} route, otherwise the catch-all intercepts them.
+
+# ── Health & Diagnostic routes ────────────────────────────────────────────────
+# Registered FIRST — before all API routers and the catch-all static route.
+# This ensures they are never intercepted by the catch-all /{full_path:path}.
 
 @app.get("/health", tags=["System"])
 async def health_check():
-    """Basic health check — used by Render.com uptime monitoring."""
-    return {"status": "ok", "version": "4.1.1"}
+    return {"status": "ok", "version": "4.1.2"}
 
 
 @app.get("/api/ping", tags=["System"])
-async def api_ping():
+async def api_ping_get():
     """
-    Diagnostic ping — no auth, no DB required.
-    Returns 200 JSON if the FastAPI app is running and routes are reachable.
-    The frontend calls this on login page load to detect server availability.
+    GET diagnostic. If this returns 200, the app is running and GET routes work.
     """
-    return {"pong": True, "version": "4.1.1", "method": "GET"}
+    return {"pong": True, "method": "GET", "version": "4.1.2"}
 
 
 @app.post("/api/ping", tags=["System"])
 async def api_ping_post():
     """
-    POST diagnostic — confirms POST requests reach FastAPI (not blocked by proxy).
-    If GET /api/ping succeeds but POST /api/ping fails, the 403s on login are
-    caused by a reverse-proxy or WAF blocking POST requests specifically.
+    POST diagnostic. If GET /api/ping works but this returns 403/400, 
+    POST requests are being blocked by infrastructure (firewall/proxy/WAF).
+    In that case check: Render.com logs, Cloudflare WAF rules, or network proxy.
     """
-    return {"pong": True, "version": "4.1.1", "method": "POST"}
+    return {"pong": True, "method": "POST", "version": "4.1.2"}
 
 
 # ── API Routers ───────────────────────────────────────────────────────────────
@@ -206,12 +225,9 @@ app.include_router(admin.router,      prefix="/api/admin",      tags=["Admin"])
 app.include_router(suppliers.router,  prefix="/api/suppliers",  tags=["Suppliers"])
 
 
-# ── Static / SPA Frontend routes ──────────────────────────────────────────────
-#
-# IMPORTANT: The catch-all /{full_path:path} must be registered LAST.
-# It must NOT intercept /api/* paths — those are handled by the routers above.
-# FastAPI matches routes in registration order; the routers above will match
-# any /api/* request before this catch-all is reached.
+# ── SPA / Static Frontend ─────────────────────────────────────────────────────
+# These catch-all routes MUST be registered LAST.
+# All /api/* requests are handled by the routers above and never reach here.
 
 @app.get("/google-callback.html", response_class=FileResponse, tags=["Static"])
 async def serve_google_callback():
@@ -226,8 +242,5 @@ async def serve_root():
 
 @app.get("/{full_path:path}", response_class=FileResponse, tags=["Static"])
 async def serve_frontend(full_path: str):
-    """
-    SPA catch-all — serves index.html for any non-API frontend route.
-    API routes (/api/*) are matched by the routers above and never reach here.
-    """
+    """Serves index.html for all non-API frontend routes (SPA routing)."""
     return FileResponse(str(INDEX_HTML), media_type="text/html")
