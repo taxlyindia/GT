@@ -1460,6 +1460,15 @@ async def export_fifo_excel(
             qty     = Decimal(str(t.qty))
             qty_abs = abs(qty)
             rate    = Decimal(str(t.purchase_rate)) if t.purchase_rate else Decimal("0")
+
+            # Skip edit-adjustment delta records (old edit logic creates these)
+            # reason starts with "Edit —" = delta from old purchase edit code.
+            # The original lot is already mutated in-place; counting the delta = double-treatment.
+            _rtype = t.txn_type.value if hasattr(t.txn_type, 'value') else str(t.txn_type)
+            _rsn   = (t.reason or '').strip()
+            if (_rtype.lower() == 'adjustment' and (
+                    _rsn.startswith('Edit —') or _rsn.startswith('Edit Reversal') or _rsn.startswith('Edit -'))):
+                continue
             inv_no, party, txn_label = _resolve(
                 t, qty, all_sinvs, inv_by_id, inv_by_no, sinv_by_no, stock)
 
@@ -1495,8 +1504,11 @@ async def export_fifo_excel(
 
         closing  = [b for b in fifo_batches if b["qty_remaining"] > 0]
         cl_value = sum(b["qty_remaining"] * b["purchase_rate"] for b in closing)
-        on_hand  = float(qty_in - qty_out)
-        avg_rate = float(cl_value / (qty_in - qty_out)) if (qty_in - qty_out) > 0 else 0.0
+        # Use FIFO batch sum for on_hand — qty_in - qty_out overcounts when
+        # edit-adjustment OUT records exist (old edit logic creates spurious OUTs)
+        on_hand_dec = sum(b["qty_remaining"] for b in fifo_batches)
+        on_hand  = float(on_hand_dec)
+        avg_rate = float(cl_value / on_hand_dec) if on_hand_dec > 0 else 0.0
 
         val_rows.append([cat, stock.purity or "—", stock.description, unit,
                          float(qty_in), float(qty_out), round(on_hand, 4),
@@ -1508,6 +1520,7 @@ async def export_fifo_excel(
                             "closing": Decimal("0")}
         cat_map[cat]["in"]      += qty_in
         cat_map[cat]["out"]     += qty_out
+        cat_map[cat]["on_hand"] = cat_map[cat].get("on_hand", Decimal("0")) + on_hand_dec
         cat_map[cat]["val_in"]  += val_in
         cat_map[cat]["val_out"] += val_out
         cat_map[cat]["closing"] += cl_value
@@ -1629,7 +1642,7 @@ async def export_fifo_excel(
         cc=CAT_CLR.get(cat,"777777")
         ci_=float(v["in"]); co_=float(v["out"])
         vi_=float(v["val_in"]); vo_=float(v["val_out"])
-        oh_=round(ci_-co_,4); cl_=float(v["closing"])
+        oh_=round(float(v.get("on_hand", ci_-co_)),4); cl_=float(v["closing"])
         sc(ws2,r,1,cat, font=Font(name="Calibri",bold=True,color=cc,size=11),fill=F_CAT,al=_L)
         sc(ws2,r,2,ci_, font=T_IN,   fill=F_CAT,al=_R,fmt="#,##0.000")
         sc(ws2,r,3,vi_, font=T_IN,   fill=F_CAT,al=_R,fmt="#,##0.00")

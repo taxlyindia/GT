@@ -551,6 +551,39 @@ def _txn_type_label(raw: str) -> str:
     }.get(str(raw).lower(), str(raw).title())
 
 
+def _is_edit_adjustment(txn) -> bool:
+    """
+    Returns True for edit-delta adjustment records created by the OLD edit logic.
+
+    OLD edit logic (suppliers / invoices before new fifo.py):
+      • Mutated the original purchase lot in-place (qty/rate updated).
+      • Created a SEPARATE StockTransaction delta record to record the difference,
+        e.g. reason = "Edit — Supplier Invoice 01 (old qty=100 rate=13200)"
+             or      "Edit Reversal — Invoice ID 5"
+
+    These delta records are NOT real stock movements. The original lot already
+    reflects the final correct qty and rate. Counting the delta record in FIFO
+    calculations causes double-treatment:
+      Purchase IN +90, Edit delta OUT -10, Cancel OUT -90  →  net = -10  ← WRONG
+      Purchase IN +90, (skip delta),       Cancel OUT -90  →  net =  0   ← CORRECT
+
+    NEW edit logic (current fifo.py):
+      • Updates original lot completely in-place, NO separate delta record created.
+      • So _is_edit_adjustment returns False for all new records — no impact.
+
+    Pattern: txn_type = adjustment AND reason starts with "Edit —" or "Edit Reversal"
+    """
+    reason = (txn.reason or '').strip()
+    raw_type = txn.txn_type.value if hasattr(txn.txn_type, 'value') else str(txn.txn_type)
+    if raw_type.lower() != 'adjustment':
+        return False
+    return (
+        reason.startswith('Edit —') or
+        reason.startswith('Edit Reversal') or
+        reason.startswith('Edit -')
+    )
+
+
 def _build_fifo_layers(batches: list, qty_out: "Decimal") -> tuple:
     from decimal import Decimal
     remaining = qty_out
@@ -636,6 +669,18 @@ async def fifo_report(
         value_out_total = Decimal("0")
 
         for t in txns:
+            # ── Skip edit-adjustment delta records ─────────────────────────────
+            # These are internal delta records from the OLD edit logic.
+            # The original lot is already mutated in-place to the final correct
+            # values. Counting the delta record here causes double-treatment.
+            # Example: purchase revised 100→90 creates:
+            #   original lot (mutated): qty=90 IN  ← the real fact
+            #   delta record:           qty=10 OUT ← should be ignored
+            # Counting both gives IN=90, OUT=10, net=80 which is wrong.
+            # Skipping the delta gives IN=90, OUT=0, net=90 which is correct.
+            if _is_edit_adjustment(t):
+                continue
+
             qty       = Decimal(str(t.qty))
             qty_abs   = abs(qty)
             raw_type  = t.txn_type.value if hasattr(t.txn_type, 'value') else str(t.txn_type)
@@ -754,9 +799,18 @@ async def fifo_report(
             }
             for b in fifo_batches if b["qty_remaining"] > 0
         ]
-        closing_value   = sum(Decimal(str(b["batch_value"])) for b in closing_batches)
-        qty_on_hand_val = qty_in_total - qty_out_total
-        avg_rate        = (
+        closing_value = sum(Decimal(str(b["batch_value"])) for b in closing_batches)
+
+        # qty_on_hand = sum of remaining FIFO batch quantities.
+        # This is authoritative: the FIFO walk correctly consumed and restored
+        # lots for every transaction type (purchase, sale, cancel, edit).
+        # Using qty_in_total - qty_out_total is WRONG when edit-reversal adjustment
+        # records exist (old edit logic), as those spurious OUT records inflate
+        # qty_out_total causing negative qty_on_hand.
+        qty_on_hand_val = sum(
+            Decimal(str(b["qty_remaining"])) for b in fifo_batches
+        )
+        avg_rate = (
             float(closing_value / qty_on_hand_val) if qty_on_hand_val > 0 else 0.0
         )
 
@@ -777,12 +831,14 @@ async def fifo_report(
 
         if cat not in category_map:
             category_map[cat] = {
-                "qty_in":    Decimal("0"), "qty_out":   Decimal("0"),
-                "value_in":  Decimal("0"), "value_out": Decimal("0"),
-                "total_value": Decimal("0"),
+                "qty_in":       Decimal("0"), "qty_out":    Decimal("0"),
+                "qty_on_hand":  Decimal("0"),
+                "value_in":     Decimal("0"), "value_out":  Decimal("0"),
+                "total_value":  Decimal("0"),
             }
         category_map[cat]["qty_in"]      += qty_in_total
         category_map[cat]["qty_out"]     += qty_out_total
+        category_map[cat]["qty_on_hand"] += qty_on_hand_val   # batch-derived, accurate
         category_map[cat]["value_in"]    += value_in_total
         category_map[cat]["value_out"]   += value_out_total
         category_map[cat]["total_value"] += closing_value
@@ -792,7 +848,9 @@ async def fifo_report(
             "category":        cat,
             "qty_in":          float(v["qty_in"]),
             "qty_out":         float(v["qty_out"]),
-            "qty_on_hand":     round(float(v["qty_in"] - v["qty_out"]), 4),
+            # Use batch-derived qty_on_hand — not qty_in minus qty_out.
+            # qty_in - qty_out overcounts when edit-adjustment OUT records exist.
+            "qty_on_hand":     round(float(v["qty_on_hand"]), 4),
             "value_in_total":  round(float(v["value_in"]),    2),
             "value_out_total": round(float(v["value_out"]),   2),
             "total_value":     round(float(v["total_value"]), 2),
