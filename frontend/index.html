@@ -4209,14 +4209,32 @@ async function api(method, path, body, admin) {
     headers: { 'Content-Type': 'application/json', ...authHeader(admin) }
   };
   if (body !== undefined) opts.body = JSON.stringify(body);
-  const res = await fetch(API + path, opts);
-  const data = await res.json().catch(() => ({}));
+
+  let res;
+  try {
+    res = await fetch(API + path, opts);
+  } catch (networkErr) {
+    // Network failure: server unreachable, DNS error, connection refused
+    throw new Error('Cannot reach server. Check your internet connection or try again.');
+  }
+
+  // Try to parse JSON body — some error responses may not be JSON
+  let data = {};
+  try { data = await res.json(); } catch (_) {}
+
   if (!res.ok) {
-    let detail = data.detail || data.message;
+    let detail = data.detail || data.message || '';
     if (Array.isArray(detail)) detail = detail.map(e => e.msg || (e.loc ? e.loc.join('.')+': '+(e.msg||'') : JSON.stringify(e))).join(' · ');
-    if (res.status === 500) throw new Error(detail || 'Server error — please try again or contact support');
-    if (res.status === 503) throw new Error('Service temporarily unavailable — please try again');
-    // Pass through the real detail when present; fall back to status code only
+
+    if (res.status === 500) throw new Error(detail || 'Server error — please try again.');
+    if (res.status === 503) throw new Error('Service temporarily unavailable — please try again.');
+    if (res.status === 502 || res.status === 504) throw new Error('Server not ready — please wait a moment and try again.');
+
+    // 403 with no detail = infrastructure block (WAF, rate limit, CORS) not an app error
+    if (res.status === 403 && !detail) throw new Error('Access blocked by server. If this persists, check your network or contact support.');
+    // 401 with no detail = token/session issue
+    if (res.status === 401 && !detail) throw new Error('Session expired. Please sign in again.');
+
     throw new Error(detail || `Request failed (HTTP ${res.status})`);
   }
   return data;
@@ -4360,10 +4378,10 @@ async function adminLogin() {
   } catch(e) {
     err.style.display = 'block';
     const msg = e.message || '';
-    if (msg.includes('HTTP 403') || msg.includes('HTTP 400') || msg.includes('HTTP 502'))
-      err.textContent = '❌ Server error — check that the backend is running and try again.';
-    else if (msg.includes('Invalid') || msg.includes('401'))
+    if (msg.includes('Invalid credentials') || msg.includes('401'))
       err.textContent = '❌ Invalid username or password.';
+    else if (msg.includes('Cannot reach') || msg.includes('not ready'))
+      err.textContent = '⚠️ Server unreachable — check that the backend is running.';
     else
       err.textContent = '❌ ' + (msg || 'Login failed — please try again.');
   } finally { setBtnLoading(btn, false); }
@@ -4722,8 +4740,7 @@ async function doLogin() {
     if (msg.includes('trial') || msg.includes('10-day')) err.textContent = '⏰ Trial ended — awaiting admin approval.';
     else if (msg.includes('pending')) err.textContent = '⏳ Account pending admin approval.';
     else if (msg.includes('disabled')) err.textContent = '🚫 Account disabled. Contact support.';
-    else if (msg.includes('HTTP 400') || msg.includes('HTTP 502') || msg.includes('HTTP 504'))
-      err.textContent = '⚠️ Server not ready — please wait a moment and try again.';
+    else if (msg.includes('Session expired')) err.textContent = '🔒 Session expired — please sign in again.';
     else err.textContent = '❌ ' + msg;
   } finally { setBtnLoading(btn, false); }
 }
@@ -7525,10 +7542,12 @@ async function signupDemo() {
     const msg = e.message || 'Signup failed';
     if (err) {
       err.style.display = 'block';
-      if (msg.includes('already exists') || msg.includes('HTTP 409'))
-        err.innerHTML = '⚠️ Mobile already registered. <span onclick="loginTab(\x27pw\x27)" style="color:var(--gold2);cursor:pointer;text-decoration:underline;font-weight:600;">Sign in instead \u2192</span>';
-      else if (msg.includes('HTTP 400') || msg.includes('HTTP 502') || msg.includes('HTTP 504'))
-        err.textContent = '⚠️ Server not ready — please try again in a moment.';
+      if (msg.includes('already exists') || msg.includes('HTTP 409') || msg.includes('409'))
+        err.innerHTML = '⚠️ Mobile already registered. <a href="#" id="_su_signin_link" style="color:var(--gold2);font-weight:600;">Sign in instead →</a>';
+        const _lnk = document.getElementById('_su_signin_link');
+        if (_lnk) _lnk.onclick = function(e){ e.preventDefault(); loginTab('pw'); };
+      else if (msg.includes('blocked') || msg.includes('Access blocked'))
+        err.textContent = '⚠️ Request blocked — please try again or use a different network.';
       else
         err.textContent = '❌ ' + msg;
     } else toast(msg, 'error');
