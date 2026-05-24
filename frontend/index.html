@@ -4170,22 +4170,18 @@ document.addEventListener('DOMContentLoaded', function() {
 ═══════════════════════════════════════════════════════════ */
 /* FE-SEC: Google Client ID — update if rotating OAuth credentials */
 const GOOGLE_CLIENT_ID = '863366877040-e8bi45pfb3mo1ec03c395g8dbaatvke5.apps.googleusercontent.com';
-// API base URL — auto-detects the deployment path prefix.
-// If the app is served at /gt/ (e.g. http://server/gt/), API calls
-// must go to /gt/api/* not /api/* — this detects that automatically.
-const _basePath = (() => {
+// API base URL — set to the sub-path prefix nginx uses to serve this app.
+// The app is served at /gt/ so all API calls must be prefixed with /gt.
+// nginx: location /gt/ { proxy_pass http://127.0.0.1:8011/; }
+// → browser sends: /gt/api/auth/login
+// → nginx strips /gt/ and forwards: /api/auth/login to uvicorn
+const API = (() => {
   const p = window.location.pathname;
-  // Find the root: everything up to and including any sub-path prefix
-  // e.g. /gt/  → base is /gt   |   /   → base is empty string
-  const match = p.match(/^(\/[^\/]+)\//) ;
-  if (match && match[1] !== '/gt' && fetch) {
-    // Check if this sub-path is likely our app prefix
-    // (not a specific page like /login)
-    return match[1];
-  }
+  // If served at /gt/... use /gt as prefix for all API calls
+  if (p.startsWith('/gt/') || p === '/gt') return '/gt';
+  // If served at root / (e.g. localhost dev), no prefix needed
   return '';
 })();
-const API = _basePath;  // e.g. '' for root, '/gt' for sub-path deployment
 
 /* ─── State ──────────────────────────────────────────────── */
 let _token = null, _user = null, _adminToken = null;
