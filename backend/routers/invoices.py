@@ -38,7 +38,9 @@ from utils.business import (
     calculate_gst, generate_invoice_no,
     is_sft_flagged, pan_is_mandatory,
 )
-from utils.fifo import fifo_deduct_sale, fifo_reverse_sale, _find_stock_item
+from utils.fifo import fifo_deduct_sale, fifo_cancel_sale, fifo_edit_sale, _find_stock_item
+# backwards-compat alias
+fifo_reverse_sale = fifo_cancel_sale
 
 router = APIRouter()
 
@@ -294,8 +296,8 @@ async def _reverse_sale_stock(
     reason_prefix: str = "Cancelled",
 ) -> None:
     """
-    Run fifo_reverse_sale() for every non-Polish item.
-    Restores lot_remaining and increments qty_on_hand.
+    Run fifo_cancel_sale() for every non-Polish item.
+    Restores lot_remaining and increments qty_on_hand (direct reversal).
     """
     for item in item_rows:
         cat_val = item.category.value if hasattr(item.category, "value") else str(item.category)
@@ -530,12 +532,12 @@ async def cancel_invoice(
     """
     Cancel a sale invoice.
 
-    FIFO reversal:
+    FIFO cancellation (direct reversal — no fresh FIFO walk):
     • Finds all non-Polish line items.
-    • For each item calls fifo_reverse_sale():
-        - Restores lot_remaining on originally-consumed IN-lots (newest-consumed first,
-          so FIFO order is perfectly reconstructed for any future sales).
-        - Adds a positive adjustment transaction at the original FIFO avg cost.
+    • For each item calls fifo_cancel_sale():
+        - Restores lot_remaining on exactly the lots originally consumed,
+          using reverse FIFO walk to undo the original deduction precisely.
+        - Records one cancellation transaction at the original FIFO avg rate.
         - Increments stock.qty_on_hand.
     • Marks invoice as cancelled and returns a credit note reference.
     """
@@ -695,29 +697,11 @@ async def edit_invoice(
         )
         old_items = old_items_res.scalars().all()
 
-        # ── STEP 1: FIFO REVERSE old items ────────────────────
-        await _reverse_sale_stock(
-            db, tenant_id, int(payload["sub"]),
-            invoice_id, date.today(), old_items,
-            reason_prefix="Edit Reversal",
-        )
+        # ── EDIT: Update items in-place, modify FIFO lots directly ──────
+        # Rule: Edit must NOT create reversal+new entries.
+        # The original sale StockTransaction is updated in-place.
+        # FIFO lots are adjusted: old qty returned, new qty consumed.
 
-        # ── STEP 2: DELETE old items + old sale transactions ──
-        for old_item in old_items:
-            await db.delete(old_item)
-        await db.flush()
-
-        old_sale_txns = (await db.execute(
-            select(StockTransaction).where(
-                StockTransaction.invoice_id == invoice_id,
-                StockTransaction.txn_type   == StockTxnType.sale,
-            )
-        )).scalars().all()
-        for txn in old_sale_txns:
-            await db.delete(txn)
-        await db.flush()
-
-        # ── STEP 3: Build new items, pre-check, FIFO deduct ──
         new_gst_type = body.gst_type or (
             invoice.gst_type.value if hasattr(invoice.gst_type, "value") else str(invoice.gst_type)
         )
@@ -728,10 +712,47 @@ async def edit_invoice(
             else (invoice.round_off or Decimal("0"))
         )
 
+        # Build map of old items by (category, purity) for matching
+        old_item_map: dict[tuple, InvoiceItem] = {}
+        for oi in old_items:
+            cat = oi.category.value if hasattr(oi.category, "value") else str(oi.category)
+            key = (cat, oi.purity or "")
+            old_item_map[key] = oi
+
         new_rows, subtotal = _build_item_rows(tenant_id, body.items, invoice_id)
 
-        # Pre-check stock availability with fresh on-hand (after reversal)
+        # Pre-check stock availability
         await _check_stock_availability(db, tenant_id, new_rows)
+
+        # Apply FIFO edits in-place for each item
+        for new_item in new_rows:
+            cat_val = new_item.category.value if hasattr(new_item.category, "value") else str(new_item.category)
+            if cat_val == "Polish Charges":
+                continue
+            key     = (cat_val, new_item.purity or "")
+            old_item = old_item_map.get(key)
+            old_qty  = old_item.qty if old_item else Decimal("0")
+
+            stock = await _find_stock_for_sale(db, tenant_id, new_item.category, new_item.purity)
+            if stock:
+                await fifo_edit_sale(
+                    db,
+                    tenant_id=tenant_id,
+                    created_by=int(payload["sub"]),
+                    invoice_id=invoice_id,
+                    invoice_date=invoice.invoice_date,
+                    stock=stock,
+                    old_qty=old_qty,
+                    new_qty=new_item.qty,
+                )
+
+        # Delete old InvoiceItem rows and replace with new ones
+        for old_item in old_items:
+            await db.delete(old_item)
+        await db.flush()
+        for row in new_rows:
+            db.add(row)
+        await db.flush()
 
         gst       = calculate_gst(subtotal, new_gst_rate, new_gst_type)
         new_grand = subtotal + gst["total_gst"] + new_round
@@ -740,7 +761,7 @@ async def edit_invoice(
             raise HTTPException(422,
                 f"PAN is mandatory — invoice value ₹{new_grand:,.0f} exceeds ₹2,00,000.")
 
-        # ── STEP 4: Update invoice financials ─────────────────
+        # Update invoice financials
         amount_paid         = invoice.amount_paid
         invoice.subtotal    = subtotal
         invoice.cgst        = gst["cgst"]
@@ -755,18 +776,6 @@ async def edit_invoice(
             invoice.payment_status = PaymentStatus.partial
         else:
             invoice.payment_status = PaymentStatus.unpaid
-
-        for row in new_rows:
-            db.add(row)
-        await db.flush()
-
-        # FIFO deduct new items
-        await _deduct_sale_stock(
-            db, tenant_id, int(payload["sub"]),
-            invoice_id,
-            invoice.invoice_date,   # use (possibly updated) invoice date
-            new_rows,
-        )
 
     await db.commit()
     await db.refresh(invoice)

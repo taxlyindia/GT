@@ -36,8 +36,10 @@ from models import (
 )
 from utils.auth import get_current_user_payload
 from utils.fifo import (
-    fifo_add_purchase, fifo_reverse_purchase, fifo_edit_purchase_lot,
+    fifo_add_purchase, fifo_cancel_purchase, fifo_edit_purchase_lot,
 )
+# backwards-compat alias
+fifo_reverse_purchase = fifo_cancel_purchase
 
 router = APIRouter(tags=["Suppliers"])
 
