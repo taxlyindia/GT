@@ -157,6 +157,16 @@ app.include_router(suppliers.router,  prefix="/api/suppliers",  tags=["Suppliers
 async def health():
     return {"status": "ok"}
 
+@app.get("/api/ping")
+async def ping():
+    """Diagnostic endpoint — no auth, no DB. If this returns 200, the app is running."""
+    return {"pong": True, "version": "4.1.0"}
+
+@app.post("/api/ping")
+async def ping_post():
+    """POST diagnostic — tests if POST requests reach the app."""
+    return {"pong": True, "method": "POST"}
+
 @app.get("/google-callback.html", response_class=FileResponse)
 async def serve_google_callback():
     cb = FRONTEND_DIR / "google-callback.html"
