@@ -2438,6 +2438,9 @@ document.addEventListener('DOMContentLoaded', function() {
           <div class="auth-title">Welcome back</div>
           <div class="auth-sub">Sign in to your GoldTrader Pro account</div>
         </div>
+        <!-- Server status banner (shown if backend unreachable) -->
+        <div id="server-status-banner" class="alert al-r" style="display:none;margin-bottom:10px;font-size:13px;"></div>
+
         <!-- Sign In View (default) -->
         <div id="lt-pw">
           <div id="login-err" class="alert al-r" style="display:none;margin-bottom:10px;"></div>
@@ -4321,8 +4324,23 @@ function scrollToSection(id) {
 }
 function openLoginScreen() {
   goTo('s-crm-login');
-  // Small delay ensures DOM is rendered before we manipulate display
   requestAnimationFrame(() => loginTab('pw'));
+  // Check server reachability silently — show banner if unreachable
+  _checkServerReachable();
+}
+
+async function _checkServerReachable() {
+  const banner = document.getElementById('server-status-banner');
+  try {
+    const r = await fetch('/api/ping', { method: 'GET' });
+    if (r.ok) {
+      if (banner) banner.style.display = 'none';
+    } else {
+      if (banner) { banner.style.display = 'block'; banner.textContent = '⚠️ Server returned ' + r.status + '. Check Render.com logs.'; }
+    }
+  } catch(e) {
+    if (banner) { banner.style.display = 'block'; banner.textContent = '🔴 Cannot reach server — is the backend running?'; }
+  }
 }
 
 function toggleLandingTheme() {
@@ -7542,14 +7560,12 @@ async function signupDemo() {
     const msg = e.message || 'Signup failed';
     if (err) {
       err.style.display = 'block';
-      if (msg.includes('already exists') || msg.includes('HTTP 409') || msg.includes('409'))
+      if (msg.includes('already exists') || msg.includes('409'))
         err.innerHTML = '⚠️ Mobile already registered. <a href="#" id="_su_signin_link" style="color:var(--gold2);font-weight:600;">Sign in instead →</a>';
-        const _lnk = document.getElementById('_su_signin_link');
-        if (_lnk) _lnk.onclick = function(e){ e.preventDefault(); loginTab('pw'); };
-      else if (msg.includes('blocked') || msg.includes('Access blocked'))
-        err.textContent = '⚠️ Request blocked — please try again or use a different network.';
       else
         err.textContent = '❌ ' + msg;
+      const _lnk = document.getElementById('_su_signin_link');
+      if (_lnk) _lnk.onclick = function(ev){ ev.preventDefault(); loginTab('pw'); };
     } else toast(msg, 'error');
   } finally { if (btn) btn.disabled = false; }
 }
