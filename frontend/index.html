@@ -4217,28 +4217,35 @@ async function api(method, path, body, admin) {
   try {
     res = await fetch(API + path, opts);
   } catch (networkErr) {
-    // Network failure: server unreachable, DNS error, connection refused
-    throw new Error('Cannot reach server. Check your internet connection or try again.');
+    throw new Error('Cannot reach server. Check your internet connection and try again.');
   }
 
-  // Try to parse JSON body — some error responses may not be JSON
+  // Parse JSON body — gracefully handles non-JSON error pages
   let data = {};
   try { data = await res.json(); } catch (_) {}
 
   if (!res.ok) {
+    // Extract detail message — FastAPI uses "detail", some APIs use "message"
     let detail = data.detail || data.message || '';
-    if (Array.isArray(detail)) detail = detail.map(e => e.msg || (e.loc ? e.loc.join('.')+': '+(e.msg||'') : JSON.stringify(e))).join(' · ');
+    // Pydantic validation errors come as arrays
+    if (Array.isArray(detail)) {
+      detail = detail.map(e => e.msg || (e.loc ? e.loc.join('.') + ': ' + (e.msg || '') : JSON.stringify(e))).join(' · ');
+    }
 
-    if (res.status === 500) throw new Error(detail || 'Server error — please try again.');
-    if (res.status === 503) throw new Error('Service temporarily unavailable — please try again.');
-    if (res.status === 502 || res.status === 504) throw new Error('Server not ready — please wait a moment and try again.');
+    if (res.status === 500) throw new Error(detail || 'Internal server error — please try again.');
+    if (res.status === 502) throw new Error('Bad gateway — server is restarting, please wait and try again.');
+    if (res.status === 503) throw new Error('Service unavailable — please wait a moment and try again.');
+    if (res.status === 504) throw new Error('Gateway timeout — server took too long, please try again.');
 
-    // 403 with no detail = infrastructure block (WAF, rate limit, CORS) not an app error
-    if (res.status === 403 && !detail) throw new Error('Access blocked by server. If this persists, check your network or contact support.');
-    // 401 with no detail = token/session issue
-    if (res.status === 401 && !detail) throw new Error('Session expired. Please sign in again.');
+    // If we have a detail message from the app, always show it
+    if (detail) throw new Error(detail);
 
-    throw new Error(detail || `Request failed (HTTP ${res.status})`);
+    // No detail = response body was empty (infrastructure block, not app error)
+    if (res.status === 403) throw new Error('Request blocked (403). The server or a firewall is rejecting this request. Check server logs.');
+    if (res.status === 401) throw new Error('Not authenticated (401). Please sign in again.');
+    if (res.status === 404) throw new Error('Not found (404). This feature may not be available on your server version.');
+
+    throw new Error(`Request failed (HTTP ${res.status})`);
   }
   return data;
 }
@@ -4331,15 +4338,22 @@ function openLoginScreen() {
 
 async function _checkServerReachable() {
   const banner = document.getElementById('server-status-banner');
+  if (!banner) return;
   try {
-    const r = await fetch('/api/ping', { method: 'GET' });
-    if (r.ok) {
-      if (banner) banner.style.display = 'none';
+    const r = await fetch('/api/ping', { method: 'GET', cache: 'no-store' });
+    const data = await r.json().catch(() => ({}));
+    if (r.ok && data.pong) {
+      banner.style.display = 'none';   // App is up — hide banner
+    } else if (r.status === 404) {
+      // 404 on /api/ping means OLD backend without this route — still running
+      banner.style.display = 'none';
     } else {
-      if (banner) { banner.style.display = 'block'; banner.textContent = '⚠️ Server returned ' + r.status + '. Check Render.com logs.'; }
+      banner.style.display = 'block';
+      banner.textContent = '⚠️ Server issue (' + r.status + ') — please wait and retry.';
     }
   } catch(e) {
-    if (banner) { banner.style.display = 'block'; banner.textContent = '🔴 Cannot reach server — is the backend running?'; }
+    banner.style.display = 'block';
+    banner.textContent = '🔴 Cannot reach server — check your internet connection.';
   }
 }
 
@@ -4395,13 +4409,8 @@ async function adminLogin() {
     renderTenants();
   } catch(e) {
     err.style.display = 'block';
-    const msg = e.message || '';
-    if (msg.includes('Invalid credentials') || msg.includes('401'))
-      err.textContent = '❌ Invalid username or password.';
-    else if (msg.includes('Cannot reach') || msg.includes('not ready'))
-      err.textContent = '⚠️ Server unreachable — check that the backend is running.';
-    else
-      err.textContent = '❌ ' + (msg || 'Login failed — please try again.');
+    const msg = e.message || 'Login failed — please try again.';
+    err.textContent = '❌ ' + msg;
   } finally { setBtnLoading(btn, false); }
 }
 
@@ -4754,12 +4763,15 @@ async function doLogin() {
     enterCRM(res);
   } catch(e) {
     err.style.display = 'block';
-    const msg = e.message || 'Login failed';
-    if (msg.includes('trial') || msg.includes('10-day')) err.textContent = '⏰ Trial ended — awaiting admin approval.';
-    else if (msg.includes('pending')) err.textContent = '⏳ Account pending admin approval.';
-    else if (msg.includes('disabled')) err.textContent = '🚫 Account disabled. Contact support.';
-    else if (msg.includes('Session expired')) err.textContent = '🔒 Session expired — please sign in again.';
-    else err.textContent = '❌ ' + msg;
+    const msg = e.message || 'Login failed — please try again.';
+    if (msg.includes('trial') || msg.includes('10-day'))
+      err.textContent = '⏰ ' + msg;
+    else if (msg.includes('pending'))
+      err.textContent = '⏳ ' + msg;
+    else if (msg.includes('disabled'))
+      err.textContent = '🚫 ' + msg;
+    else
+      err.textContent = '❌ ' + msg;
   } finally { setBtnLoading(btn, false); }
 }
 
@@ -7557,16 +7569,19 @@ async function signupDemo() {
     toast('Account created! Welcome to GoldTrader Pro 🎉','success');
     enterCRM(res);
   } catch(e) {
-    const msg = e.message || 'Signup failed';
+    const msg = e.message || 'Signup failed — please try again.';
     if (err) {
       err.style.display = 'block';
-      if (msg.includes('already exists') || msg.includes('409'))
+      if (msg.includes('already exists') || msg.includes('409')) {
         err.innerHTML = '⚠️ Mobile already registered. <a href="#" id="_su_signin_link" style="color:var(--gold2);font-weight:600;">Sign in instead →</a>';
-      else
+        const lnk = document.getElementById('_su_signin_link');
+        if (lnk) lnk.onclick = function(ev){ ev.preventDefault(); loginTab('pw'); };
+      } else {
         err.textContent = '❌ ' + msg;
-      const _lnk = document.getElementById('_su_signin_link');
-      if (_lnk) _lnk.onclick = function(ev){ ev.preventDefault(); loginTab('pw'); };
-    } else toast(msg, 'error');
+      }
+    } else {
+      toast(msg, 'error');
+    }
   } finally { if (btn) btn.disabled = false; }
 }
 
