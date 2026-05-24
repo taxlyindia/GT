@@ -1,0 +1,5 @@
+-- Migration 07: round_off (OPTIONAL — NOT REQUIRED)
+-- round_off is now computed as a Python @property on the Invoice model:
+--   round_off = grand_total - subtotal - cgst - sgst - igst - tcs_amount
+-- No database column is needed. Grand total already stores the rounded value.
+-- This file is kept for documentation only. Do NOT run it.
