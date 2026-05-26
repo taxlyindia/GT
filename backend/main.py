@@ -1,6 +1,7 @@
 # ============================================================
 # GoldTrader Pro — FastAPI Backend  v4.1.2
 # Taxly India Private Limited
+# Hosted on: Hostinger VPS (Ubuntu 22.04)
 # ============================================================
 
 import logging
@@ -21,6 +22,9 @@ from routers import (
 import models  # noqa: F401
 
 # ── Logging setup ─────────────────────────────────────────────────────────────
+# Logs go to stdout — captured by systemd journal on Hostinger VPS.
+# View live: sudo journalctl -u goldtrader -f
+# View last 100 lines: sudo journalctl -u goldtrader -n 100
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
@@ -33,9 +37,23 @@ INDEX_HTML   = FRONTEND_DIR / "index.html"
 
 
 # ── DB startup ────────────────────────────────────────────────────────────────
+# Track DB health so /health and /api/diagnose can report it accurately
+_db_ready: bool = False
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    global _db_ready
     logger.info("Starting up GoldTrader Pro v4.1.2...")
+
+    # Validate DATABASE_URL is configured for production
+    from config import settings as _s
+    if not _s.DATABASE_URL or _s.DATABASE_URL == "postgresql+asyncpg://gt:cms123@localhost:5432/gt":
+        logger.warning(
+            "DATABASE_URL is using the default value. "
+            "Edit /etc/goldtrader/.env on your Hostinger VPS and set "
+            "DATABASE_URL to your actual PostgreSQL connection string."
+        )
+
     try:
         async with engine.begin() as conn:
             await conn.run_sync(Base.metadata.create_all)
@@ -69,9 +87,19 @@ async def lifespan(app: FastAPI):
                 END $$;
             """))
 
-        logger.info("Database ready.")
+        _db_ready = True
+        logger.info("Database ready. GoldTrader Pro is accepting requests.")
     except Exception as e:
-        logger.error(f"DB startup error: {e}")
+        _db_ready = False
+        logger.error(
+            f"DB startup error: {e}\n"
+            "CHECK: Is PostgreSQL running on the VPS?  →  sudo systemctl status postgresql\n"
+            "CHECK: Is DATABASE_URL correct in /etc/goldtrader/.env ?\n"
+            "CHECK: Does the database user have CONNECT + USAGE permissions?\n"
+            "RUN:   sudo -u postgres psql -c '\\l'  to list databases"
+        )
+        # Do NOT raise — let the app start so /health returns a useful error
+        # instead of nginx returning a bare 502 with no body.
 
     yield
     await engine.dispose()
@@ -84,13 +112,13 @@ app = FastAPI(
     description="Jewellery business management",
     version="4.1.2",
     lifespan=lifespan,
-    redirect_slashes=False,   # ← CRITICAL: prevent 307 redirects that convert POST→GET
+    redirect_slashes=False,   # CRITICAL: prevent 307 redirects that convert POST→GET
 )
 
 
 # ── Request logger middleware ─────────────────────────────────────────────────
-# Logs every request + response status to Render.com logs.
-# Check Render dashboard → Logs to see what's happening with each request.
+# Logs every request + response status.
+# View on Hostinger VPS: sudo journalctl -u goldtrader -f
 
 @app.middleware("http")
 async def log_requests(request: Request, call_next):
@@ -190,13 +218,33 @@ logger.info(f"CORS credentials: {_ALLOW_CREDENTIALS}")
 
 @app.get("/health", tags=["System"])
 async def health_check():
-    return {"status": "ok", "version": "4.1.2"}
+    """
+    Health check endpoint — used by nginx upstream checks and monitoring tools.
+    Returns db_ready=false with instructions if the database is not connected.
+    Always returns HTTP 200 so the process stays up and nginx can report the error.
+    """
+    if _db_ready:
+        return {"status": "ok", "version": "4.1.2", "db_ready": True}
+    else:
+        return {
+            "status": "degraded",
+            "version": "4.1.2",
+            "db_ready": False,
+            "error": "Database not connected. Check DATABASE_URL in /etc/goldtrader/.env",
+            "fix": (
+                "On your Hostinger VPS, run: sudo nano /etc/goldtrader/.env\n"
+                "Set DATABASE_URL=postgresql+asyncpg://USER:PASS@localhost:5432/DBNAME\n"
+                "Then restart: sudo systemctl restart goldtrader"
+            ),
+        }
 
 
 @app.get("/api/ping", tags=["System"])
 async def api_ping_get():
     """
     GET diagnostic. If this returns 200, the app is running and GET routes work.
+    If nginx returns 502 here, the uvicorn process is not running.
+    Check: sudo systemctl status goldtrader
     """
     return {"pong": True, "method": "GET", "version": "4.1.2"}
 
@@ -204,11 +252,60 @@ async def api_ping_get():
 @app.post("/api/ping", tags=["System"])
 async def api_ping_post():
     """
-    POST diagnostic. If GET /api/ping works but this returns 403/400, 
-    POST requests are being blocked by infrastructure (firewall/proxy/WAF).
-    In that case check: Render.com logs, Cloudflare WAF rules, or network proxy.
+    POST diagnostic. If GET /api/ping works but this returns 400/403,
+    POST requests are being blocked by nginx or a firewall rule.
+    Check: sudo nginx -t  and  sudo ufw status
     """
     return {"pong": True, "method": "POST", "version": "4.1.2"}
+
+
+@app.get("/api/diagnose", tags=["System"])
+async def diagnose():
+    """
+    Deployment diagnostic — open in browser to debug login issues.
+    Returns the current state of the server, database, and configuration.
+    Safe to expose publicly (no secrets returned).
+    """
+    from config import settings as _s
+    db_url_safe = "NOT SET" if not _s.DATABASE_URL else (
+        "localhost default (not configured)" if _s.DATABASE_URL == "postgresql+asyncpg://gt:cms123@localhost:5432/gt"
+        else "configured ✓"
+    )
+    jwt_ok    = _s.JWT_SECRET not in {"change-me-generate-with-secrets-token-hex-32", "replace-with-a-32-char-random-string-here", ""}
+    google_ok = bool(_s.GOOGLE_CLIENT_ID and _s.GOOGLE_CLIENT_SECRET)
+
+    issues = []
+    if not _db_ready:
+        issues.append(
+            "DATABASE_URL not connected — "
+            "check /etc/goldtrader/.env and run: sudo systemctl status postgresql"
+        )
+    if not jwt_ok:
+        issues.append(
+            "JWT_SECRET is using the insecure default — "
+            "generate one: python3 -c \"import secrets; print(secrets.token_hex(32))\""
+            " and set it in /etc/goldtrader/.env"
+        )
+    if not google_ok:
+        issues.append(
+            "Google OAuth not configured — "
+            "set GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET in /etc/goldtrader/.env"
+        )
+
+    return {
+        "app":          "GoldTrader Pro v4.1.2",
+        "host":         "Hostinger VPS",
+        "status":       "ok" if _db_ready else "degraded — database not connected",
+        "db_ready":     _db_ready,
+        "db_url":       db_url_safe,
+        "jwt_secret":   "configured ✓" if jwt_ok else "⚠ using insecure default",
+        "google_oauth": "configured ✓" if google_ok else "⚠ not configured (Google Sign-In disabled)",
+        "issues":       issues if issues else ["none — all systems operational ✓"],
+        "next_step": (
+            "Edit /etc/goldtrader/.env → set DATABASE_URL → sudo systemctl restart goldtrader"
+            if not _db_ready else "All good — login should work."
+        ),
+    }
 
 
 # ── API Routers ───────────────────────────────────────────────────────────────
