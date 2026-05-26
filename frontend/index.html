@@ -4242,7 +4242,7 @@ async function api(method, path, body, admin) {
 
     // No detail = response body was empty (infrastructure block, not app error).
     // FIX [FIX-06]: A bare 400 with no JSON body is produced by the hosting
-    // proxy (Render.com / nginx) when the backend process is not running or
+    // proxy (nginx on Hostinger VPS) when the backend process is not running or
     // still starting up — the app code itself never returns 400 without a
     // detail message on the /api/auth/login endpoint.
     if (res.status === 400) throw new Error('Server rejected the request. The backend may still be starting up — please wait 30 seconds and try again.');
@@ -4341,28 +4341,37 @@ function openLoginScreen() {
   _checkServerReachable();
 }
 
-// FIX [FIX-07]: Returns true if server is reachable, false otherwise.
-// Callers (doLogin, doSignupDemo, signupDemo) now call this before every
-// submit so a server that goes down AFTER the login page loads is detected
-// immediately instead of producing a cryptic HTTP 400/500 error.
+// FIX [FIX-07]: Returns true if server is reachable AND database is connected.
+// Uses /api/diagnose (new endpoint) to distinguish "server down" from
+// "server running but DB not configured" — giving the user a precise message.
+// Falls back to /api/ping if diagnose is not available (older backend).
 async function _checkServerReachable() {
   const banner = document.getElementById('server-status-banner');
   try {
-    const r = await fetch('/api/ping', { method: 'GET', cache: 'no-store' });
-    const data = await r.json().catch(() => ({}));
-    if (r.ok && data.pong) {
+    // Try the richer /api/diagnose endpoint first
+    const r = await fetch('/api/diagnose', { method: 'GET', cache: 'no-store' });
+    if (r.ok) {
+      const data = await r.json().catch(() => ({}));
+      if (data.db_ready === false) {
+        if (banner) {
+          banner.style.display = 'block';
+          banner.innerHTML = '⚠️ <strong>Database not connected.</strong> ' +
+            (data.next_step || 'Check DATABASE_URL in /etc/goldtrader/.env on your Hostinger VPS, then run: sudo systemctl restart goldtrader');
+        }
+        return false;
+      }
       if (banner) banner.style.display = 'none';
       return true;
-    } else if (r.status === 404) {
-      // 404 on /api/ping = old backend without this route — still running
-      if (banner) banner.style.display = 'none';
-      return true;
-    } else {
-      if (banner) { banner.style.display = 'block'; banner.textContent = '⚠️ Server issue (' + r.status + ') — please wait 30 seconds and retry.'; }
-      return false;
     }
+    // Fall back to /api/ping for older backends
+    const p = await fetch('/api/ping', { method: 'GET', cache: 'no-store' });
+    const pd = await p.json().catch(() => ({}));
+    if (p.ok && pd.pong) { if (banner) banner.style.display = 'none'; return true; }
+    if (p.status === 404) { if (banner) banner.style.display = 'none'; return true; }
+    if (banner) { banner.style.display = 'block'; banner.textContent = '⚠️ Server issue (' + p.status + ') — please wait 30 seconds and retry.'; }
+    return false;
   } catch(e) {
-    if (banner) { banner.style.display = 'block'; banner.textContent = '🔴 Cannot reach server — check your internet connection.'; }
+    if (banner) { banner.style.display = 'block'; banner.textContent = '🔴 Cannot reach server — check your internet connection or run: sudo systemctl status goldtrader on the VPS.'; }
     return false;
   }
 }
