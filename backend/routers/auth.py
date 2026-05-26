@@ -1,4 +1,13 @@
 # routers/auth.py — Authentication endpoints
+# FIX LOG:
+#   [FIX-01] password_login: added .limit(1) to login query to prevent
+#            MultipleResultsFound crash when the same username exists in
+#            different tenants (UNIQUE constraint is per-tenant, not global).
+#   [FIX-02] google_login: same .limit(1) guard on google_id lookup.
+#   [FIX-03] google/callback: added clarifying comment — claims decoded
+#            without signature verification, which is intentional and safe
+#            because the token was obtained server-side from Google's token
+#            endpoint. Actual verification happens in verify_google_token().
 
 from datetime import datetime, timedelta, timezone
 from fastapi import APIRouter, Depends, HTTPException, status
@@ -54,11 +63,18 @@ class TokenResponse(BaseModel):
 @router.post("/login", response_model=TokenResponse)
 async def password_login(body: PasswordLoginRequest, db: AsyncSession = Depends(get_db)):
     """Login with username/mobile + password."""
+    # FIX-01: Use .limit(1) to prevent MultipleResultsFound when the same
+    # username exists across different tenants. The DB schema enforces
+    # UNIQUE(tenant_id, username) — not global uniqueness — so duplicate
+    # usernames across tenants are possible. scalar_one_or_none() raises
+    # MultipleResultsFound in that case, producing an unhandled 500 error.
+    # Mobile IS globally unique (enforced in signup), so mobile login is
+    # always safe, but username login was not. The .limit(1) guard covers both.
     result = await db.execute(
         select(User).where(
             (User.username == body.username_or_mobile) |
             (User.mobile   == body.username_or_mobile)
-        )
+        ).limit(1)
     )
     user = result.scalar_one_or_none()
 
@@ -142,7 +158,12 @@ async def google_login(body: GoogleLoginRequest, db: AsyncSession = Depends(get_
     google_id = claims["sub"]
     email     = claims["email"]
 
-    result = await db.execute(select(User).where(User.google_id == google_id))
+    # FIX-02: google_id is unique per Google account so duplicates are
+    # not expected here, but .limit(1) is added as a safety guard
+    # consistent with the password login fix above.
+    result = await db.execute(
+        select(User).where(User.google_id == google_id).limit(1)
+    )
     user   = result.scalar_one_or_none()
 
     if not user:
@@ -216,7 +237,7 @@ async def google_signup(body: GoogleSignupRequest, db: AsyncSession = Depends(ge
     name      = claims.get("name", email)
 
     # Check if Google account already has an account
-    result = await db.execute(select(User).where(User.google_id == google_id))
+    result = await db.execute(select(User).where(User.google_id == google_id).limit(1))
     if result.scalar_one_or_none():
         raise HTTPException(status_code=409, detail="Google account already registered. Please login.")
 
@@ -281,7 +302,7 @@ async def demo_signup(body: DemoSignupRequest, db: AsyncSession = Depends(get_db
         raise HTTPException(status_code=422, detail="Mobile number must be exactly 10 digits.")
 
     # Check mobile uniqueness globally (one account per mobile number across all tenants)
-    result = await db.execute(select(User).where(User.mobile == body.mobile))
+    result = await db.execute(select(User).where(User.mobile == body.mobile).limit(1))
     if result.scalar_one_or_none():
         raise HTTPException(
             status_code=409,
@@ -387,7 +408,13 @@ async def google_oauth_callback(body: GoogleCallbackRequest, db: AsyncSession = 
         id_token_str = token_data.get("id_token", "")
         if not id_token_str:
             raise HTTPException(status_code=400, detail="No id_token returned from Google")
-        # Decode claims for display (already verified by Google)
+
+        # FIX-03: The claims below are decoded WITHOUT verifying the JWT signature.
+        # This is intentional and safe — the token was obtained directly from
+        # Google's token endpoint over TLS (server-side exchange above), so its
+        # authenticity is guaranteed by the exchange itself.
+        # Actual signature verification happens in verify_google_token() during
+        # the subsequent /google/login or /google/signup call.
         import base64 as _b64, json as _json
         parts = id_token_str.split(".")
         padded = parts[1] + "=" * (4 - len(parts[1]) % 4)
@@ -406,7 +433,6 @@ async def google_oauth_callback(body: GoogleCallbackRequest, db: AsyncSession = 
 # ── Company Profile ────────────────────────────────────────────────────────
 # GET  /api/auth/profile  — load current tenant profile
 # PUT  /api/auth/profile  — save (update) tenant profile
-# Fix: "Method Not Allowed" was caused by missing GET + PUT; only POST existed.
 
 from typing import Optional as _Opt
 
@@ -467,8 +493,6 @@ async def update_company_profile(
     """
     Save company profile (name, GSTIN, address, logo, bank details, UPI, terms).
     Printed on every invoice PDF.
-    Fix: previously returned 405 Method Not Allowed because only POST /signup
-    was registered on /api/auth — GET and PUT were missing.
     """
     tenant = await db.get(Tenant, payload["tenant_id"])
     if not tenant:

@@ -1,15 +1,18 @@
-# routers/admin.py  — v42
+# routers/admin.py  — v42 (patched)
 # GoldTrader Pro — Super-admin console
-# Fixes in this version:
-#  1. GET /tenants: now returns trial_expires_at, days_left, created_at, signup_type
-#  2. PATCH /approve: activates Tenant + User accounts, sets plan='approved'
-#  3. PATCH /reject: disables Tenant + User accounts
-#  4. GET /google-requests: returns trial_expires_at + days_left (field name fixed)
-#  5. PATCH /tenants/{id}/extend-trial: extend trial by N days
-#  6. DELETE cascade: wrapped per-table in try/except to survive missing FKs
+# FIX LOG (this version):
+#   [FIX-04] create_tenant: added global mobile uniqueness check before
+#            creating the admin user. Without this, the super-admin could
+#            create a tenant with a mobile already used in another tenant,
+#            violating the login assumption that mobile is globally unique
+#            and causing scalar_one_or_none() to crash with 500 on login.
+#   [FIX-05] create_tenant: set trial_expires_at and approval_status
+#            correctly for demo-plan tenants so the trial timer actually
+#            starts. Previously trial_expires_at was NULL for admin-created
+#            tenants, so is_trial_active() always returned False.
 
 from __future__ import annotations
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from typing import Optional
 from decimal import Decimal
 
@@ -84,9 +87,7 @@ def _days_left(expires_at) -> int:
     if not expires_at:
         return 0
     try:
-        # If it's a datetime (aware or naive), extract the date in UTC
         if hasattr(expires_at, 'hour'):
-            # It's a datetime — normalise to UTC date
             from datetime import timezone as _tz
             if expires_at.tzinfo is None:
                 exp_date = expires_at.date()
@@ -94,7 +95,7 @@ def _days_left(expires_at) -> int:
                 import datetime as _dt
                 exp_date = expires_at.astimezone(_tz.utc).date()
         else:
-            exp_date = expires_at  # already a plain date
+            exp_date = expires_at
         return (exp_date - date.today()).days
     except Exception:
         return 0
@@ -125,7 +126,6 @@ def _tenant_extra(t: Tenant, admin_user=None) -> dict:
     """
     created_at = getattr(t, "created_at", None)
     plan       = getattr(t, "plan", "demo")
-    # plan is a PlanEnum — get its value safely
     plan_val   = plan.value if hasattr(plan, "value") else str(plan or "demo")
 
     result = {
@@ -143,7 +143,6 @@ def _tenant_extra(t: Tenant, admin_user=None) -> dict:
     if admin_user:
         trial_info = _user_trial_extra(admin_user)
         result.update(trial_info)
-        # Determine signup type
         prov = getattr(admin_user, "auth_provider", None)
         prov_val = prov.value if hasattr(prov, "value") else str(prov or "password")
         result["signup_type"] = "google" if prov_val == "google" else "demo"
@@ -155,7 +154,6 @@ def _tenant_extra(t: Tenant, admin_user=None) -> dict:
 
 @router.post("/login")
 async def admin_login(body: AdminLoginBody):
-    # Case-insensitive username comparison — handles "Taxly" vs "taxly" etc.
     if body.username.strip().lower() != ADMIN_USERNAME.strip().lower():
         raise HTTPException(
             status_code=401,
@@ -201,7 +199,6 @@ async def list_tenants(
         i_count = (await db.execute(
             select(func.count()).select_from(Invoice).where(Invoice.tenant_id == t.id)
         )).scalar() or 0
-        # Get the admin user to read trial_expires_at (it lives on User, not Tenant)
         admin_u_res = await db.execute(
             select(User).where(User.tenant_id == t.id).order_by(User.id)
         )
@@ -231,15 +228,47 @@ async def create_tenant(
         plan_val = PlanEnum(body.plan)
     except (ValueError, KeyError):
         plan_val = PlanEnum.demo
+
+    # FIX-04: Enforce global mobile uniqueness before inserting the user.
+    # The DB schema only has UNIQUE(tenant_id, mobile), so two tenants can
+    # have the same mobile. This breaks the login query which uses
+    # scalar_one_or_none() on a global mobile lookup, producing a 500 error.
+    # demo_signup already has this check — we mirror it here.
+    existing_mobile = await db.execute(
+        select(User).where(User.mobile == body.admin_mobile).limit(1)
+    )
+    if existing_mobile.scalar_one_or_none():
+        raise HTTPException(
+            status_code=409,
+            detail=f"A user with mobile {body.admin_mobile} already exists. "
+                   "Use a different mobile number for this tenant's admin account.",
+        )
+
     tenant = Tenant(company_name=body.company_name, is_active=True, plan=plan_val)
     db.add(tenant)
     await db.flush()
+
     hashed = bcrypt.hashpw(body.password.encode(), bcrypt.gensalt()).decode()
+
+    # FIX-05: Set trial_expires_at and approval_status correctly for demo
+    # tenants. Previously these were left as NULL / approved, so the trial
+    # timer never started and is_trial_active() always returned False.
+    if plan_val == PlanEnum.demo:
+        trial_expires   = datetime.now(timezone.utc) + timedelta(days=settings.TRIAL_DAYS)
+        approval_status = ApprovalStatus.trial
+    else:
+        trial_expires   = None
+        approval_status = ApprovalStatus.approved
+
     user = User(
-        tenant_id=tenant.id, username=body.admin_username,
-        mobile=body.admin_mobile, password_hash=hashed,
-        role=RoleEnum.admin, is_active=True,
-        approval_status=ApprovalStatus.approved,
+        tenant_id=tenant.id,
+        username=body.admin_username,
+        mobile=body.admin_mobile,
+        password_hash=hashed,
+        role=RoleEnum.admin,
+        is_active=True,
+        approval_status=approval_status,
+        trial_expires_at=trial_expires,
     )
     db.add(user)
     await db.commit()
@@ -258,7 +287,6 @@ async def toggle_tenant(
     if not t:
         raise HTTPException(404, "Tenant not found")
     t.is_active = not t.is_active
-    # Also toggle all users of this tenant
     await db.execute(
         sql_update(User).where(User.tenant_id == tenant_id)
         .values(is_active=t.is_active)
@@ -289,7 +317,7 @@ async def reset_tenant_password(
     return {"message": "Password reset"}
 
 
-# ── PATCH /tenants/{id}/extend-trial — extend trial by N days ────────────────
+# ── PATCH /tenants/{id}/extend-trial ────────────────────────────────────────
 
 @router.patch("/tenants/{tenant_id}/extend-trial")
 async def extend_trial(
@@ -299,14 +327,12 @@ async def extend_trial(
     db: AsyncSession = Depends(get_db),
 ):
     """Extend (or restart) the trial period for a tenant by N days from today."""
-    from datetime import timezone
     t = await db.get(Tenant, tenant_id)
     if not t:
         raise HTTPException(404, "Tenant not found")
     days = max(1, min(body.days, 365))
     new_expiry = datetime.now(timezone.utc) + timedelta(days=days)
     t.is_active = True
-    # Re-activate all users + update their trial_expires_at and approval_status
     await db.execute(
         sql_update(User)
         .where(User.tenant_id == tenant_id)
@@ -335,7 +361,7 @@ async def permanently_delete_tenant(
     """
     Permanently erase a tenant and all associated data.
     Each table delete is wrapped in try/except so missing FK columns
-    never block the cascade. Committed per-group for safety.
+    never block the cascade.
     """
     tenant = await db.get(Tenant, tenant_id)
     if not tenant:
@@ -370,15 +396,13 @@ async def permanently_delete_tenant(
     except Exception:
         await db.rollback()
 
-    # 5 — (GoogleSignupRequest table not used in this project)
-
-    # 6 — Users
+    # 5 — Users
     try:
         await db.execute(sql_delete(User).where(User.tenant_id == tid))
     except Exception:
         await db.rollback()
 
-    # 7 — Tenant itself
+    # 6 — Tenant itself
     await db.delete(tenant)
     await db.commit()
     return {"message": f"Tenant #{tid} permanently deleted", "tenant_id": tid, "deleted": True}
@@ -421,8 +445,7 @@ async def list_google_requests(
 ):
     """
     Returns ALL trial/pending users — both Google signups and demo (password) signups.
-    Source of truth is the User table (approval_status in: trial, pending, rejected, approved).
-    Demo users never create a GoogleSignupRequest, so we query User directly.
+    Source of truth is the User table.
     """
     result = await db.execute(
         select(User)
@@ -435,14 +458,13 @@ async def list_google_requests(
         t = await db.get(Tenant, u.tenant_id)
         trial_info = _user_trial_extra(u)
         approval   = trial_info["approval_status"]
-        # Determine status label
         if approval == "trial":
             status = "trial" if trial_info["days_left"] > 0 else "expired"
         else:
             status = approval
 
         rows.append({
-            "id":              u.id,          # NOTE: this is User.id, not GSR.id
+            "id":              u.id,
             "name":            u.username or "",
             "email":           u.email or "",
             "company":         t.company_name if t else (u.company_name or ""),
@@ -477,16 +499,14 @@ async def approve_google_request(
         raise HTTPException(404, "User not found")
 
     user.approval_status  = ApprovalStatus.approved
-    user.trial_expires_at = None   # unlimited — no longer on trial
+    user.trial_expires_at = None
     user.is_active        = True
 
-    # Activate the linked Tenant
     t = await db.get(Tenant, user.tenant_id)
     if t:
         t.is_active = True
-        t.plan      = PlanEnum.annual  # approved = full access
+        t.plan      = PlanEnum.annual
 
-    # Activate all users of that tenant
     await db.execute(
         sql_update(User)
         .where(User.tenant_id == user.tenant_id)
@@ -507,8 +527,6 @@ async def reject_google_request(
 ):
     """
     Reject a user by User.id (works for both Google and demo signups).
-    - Sets User.approval_status = rejected
-    - Disables Tenant + all its Users
     """
     user = await db.get(User, user_id)
     if not user:
@@ -517,13 +535,11 @@ async def reject_google_request(
     user.approval_status = ApprovalStatus.rejected
     user.is_active       = False
 
-    # Disable the linked Tenant
     t = await db.get(Tenant, user.tenant_id)
     if t:
         t.is_active = False
         t.plan      = PlanEnum.expired
 
-    # Disable all users of that tenant
     await db.execute(
         sql_update(User)
         .where(User.tenant_id == user.tenant_id)
