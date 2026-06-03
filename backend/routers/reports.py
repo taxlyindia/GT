@@ -893,7 +893,7 @@ async def customer_account_report(
     invoices = result.scalars().all()
 
     rows = []
-    tot  = {k: Decimal("0") for k in ["gold","silver","diamond","polish","making","cgst","sgst","igst","grand"]}
+    tot  = {k: Decimal("0") for k in ["gold","silver","diamond","polish","making","cgst","sgst","igst","grand_total"]}
 
     for inv in invoices:
         items_r = await db.execute(select(InvoiceItem).where(InvoiceItem.invoice_id == inv.id))
@@ -908,7 +908,7 @@ async def customer_account_report(
             elif cat == "Diamond":       diamond += base
             elif cat == "Polish Charges": polish += base
         for k, v in [("gold",gold),("silver",silver),("diamond",diamond),("polish",polish),
-                     ("making",making),("cgst",inv.cgst),("sgst",inv.sgst),("igst",inv.igst),("grand",inv.grand_total)]:
+                     ("making",making),("cgst",inv.cgst),("sgst",inv.sgst),("igst",inv.igst),("grand_total",inv.grand_total)]:
             tot[k] += v
         rows.append({
             "invoice_date": inv.invoice_date.isoformat(), "invoice_no": inv.invoice_no,
@@ -943,7 +943,7 @@ async def supplier_account_report(
     invoices = result.scalars().all()
 
     rows = []
-    tot  = {k: Decimal("0") for k in ["gold","silver","diamond","polish","making","cgst","sgst","igst","grand","amount_paid","outstanding"]}
+    tot  = {k: Decimal("0") for k in ["gold","silver","diamond","polish","making","cgst","sgst","igst","grand_total","amount_paid","outstanding"]}
 
     for inv in invoices:
         items_r = await db.execute(select(SupplierInvoiceItem).where(SupplierInvoiceItem.invoice_id == inv.id))
@@ -962,7 +962,7 @@ async def supplier_account_report(
         igst = inv.igst or Decimal("0")
         for k, v in [("gold",gold),("silver",silver),("diamond",diamond),("polish",polish),
                      ("making",making),("cgst",cgst),("sgst",sgst),("igst",igst),
-                     ("grand",inv.grand_total),("amount_paid",inv.amount_paid),("outstanding",inv.outstanding)]:
+                     ("grand_total",inv.grand_total),("amount_paid",inv.amount_paid),("outstanding",inv.outstanding)]:
             tot[k] += v
         rows.append({
             "invoice_date": inv.invoice_date.isoformat(),

@@ -187,6 +187,7 @@ async def list_payments(
             "reference_no":    p.reference_no or "—",
             "bank_reference":  p.reference_no or "—",
             "notes":           p.notes or "",
+            "advance_id":      p.advance_id,
         })
 
     return {
