@@ -4188,9 +4188,9 @@ const GOOGLE_CLIENT_ID = '863366877040-e8bi45pfb3mo1ec03c395g8dbaatvke5.apps.goo
   // When served by FastAPI (http/https), use same-origin (empty string).
   // The app may be mounted at a subpath (e.g. /gt) — relative API calls
   // like /api/... work correctly because the browser resolves them from origin.
-  window._GT_API_BASE = stored || injected || detected;
+  window._GT_API_BASE = stored || injected || detected || '/gt';
 })();
-const API = window._GT_API_BASE || '';  // resolved API base URL
+const API = window._GT_API_BASE;  // resolved API base URL — hardcoded to /gt for Hostinger
 
 // ── Backend connectivity check ──────────────────────────────────────────────
 // Runs once on page load. If the backend is unreachable, shows a clear
