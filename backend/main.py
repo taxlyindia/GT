@@ -3,7 +3,7 @@
 # Taxly India Private Limited
 # ============================================================
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import FileResponse
@@ -220,13 +220,14 @@ async def serve_root_gt():
     """Serve SPA when accessed at /gt subpath directly (Hostinger)."""
     return FileResponse(str(INDEX_HTML), media_type="text/html")
 
-@app.get("/{full_path:path}", response_class=FileResponse)
-async def serve_frontend(full_path: str):
-    """Catch-all: serve index.html for SPA routing.
-    Skip /api/ and /gt/api/ paths so POST/PUT/DELETE requests are never
-    intercepted by this GET-only handler (which would return 405).
+@app.api_route("/{full_path:path}", methods=["GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS"])
+async def serve_frontend(full_path: str, request: Request):
+    """Catch-all for SPA routing.
+    Accepts ALL HTTP methods so FastAPI never returns 405 before our code runs.
+    API paths (/api/*, /gt/api/*) get a proper 404 instead of 405.
+    Everything else serves index.html for SPA client-side routing.
     """
-    from fastapi import HTTPException
+    # Never serve HTML for API paths — return 404 so the real error is clear
     if full_path.startswith("api/") or full_path.startswith("gt/api/"):
-        raise HTTPException(status_code=404, detail="API endpoint not found")
+        raise HTTPException(status_code=404, detail=f"API route not found: /{full_path}")
     return FileResponse(str(INDEX_HTML), media_type="text/html")
