@@ -154,7 +154,6 @@ app = FastAPI(
     description="Complete jewellery business management — GST, TCS, SFT, FIFO",
     version="4.1.0",
     lifespan=lifespan,
-    root_path=settings.ROOT_PATH,   # e.g. "/gt" when behind a reverse proxy subpath
 )
 
 app.add_middleware(GZipMiddleware, minimum_size=1000)
@@ -215,7 +214,19 @@ async def serve_root():
     """Serve the frontend SPA."""
     return FileResponse(str(INDEX_HTML), media_type="text/html")
 
+@app.get("/gt", response_class=FileResponse)
+@app.get("/gt/", response_class=FileResponse)
+async def serve_root_gt():
+    """Serve SPA when accessed at /gt subpath directly (Hostinger)."""
+    return FileResponse(str(INDEX_HTML), media_type="text/html")
+
 @app.get("/{full_path:path}", response_class=FileResponse)
 async def serve_frontend(full_path: str):
-    """Catch-all: serve index.html for any non-API path (SPA routing)."""
+    """Catch-all: serve index.html for SPA routing.
+    Skip /api/ and /gt/api/ paths so POST/PUT/DELETE requests are never
+    intercepted by this GET-only handler (which would return 405).
+    """
+    from fastapi import HTTPException
+    if full_path.startswith("api/") or full_path.startswith("gt/api/"):
+        raise HTTPException(status_code=404, detail="API endpoint not found")
     return FileResponse(str(INDEX_HTML), media_type="text/html")
