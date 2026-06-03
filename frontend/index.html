@@ -4,6 +4,7 @@
 <meta charset="UTF-8"/>
 <meta name="viewport" content="width=device-width,initial-scale=1.0"/>
 <title>GoldTrader Pro — Jewellery CRM & Invoicing | Taxly India</title>
+<meta name="gt-version" content="v5.1-fix"/>
 <link href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:ital,wght@0,600;0,700;1,600&family=Plus+Jakarta+Sans:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet"/>
 <style>
 /* ═══════════════════════════════════════════════════
@@ -4163,6 +4164,8 @@ document.addEventListener('DOMContentLoaded', function() {
    GOLDTRADER PRO — Complete Frontend JavaScript
    Google Client ID (set via window global so GIS SDK can use it)
 ═══════════════════════════════════════════════════════════ */
+const GT_VERSION = 'v5.1-fix';  // bump this on each deploy to confirm fresh load
+console.log('[GoldTrader Pro] Frontend version:', GT_VERSION);
 const GOOGLE_CLIENT_ID = '863366877040-e8bi45pfb3mo1ec03c395g8dbaatvke5.apps.googleusercontent.com';
 // ── API Base URL Configuration ──────────────────────────────────────────────
 // Auto-detects the backend URL so the frontend works whether served by FastAPI
