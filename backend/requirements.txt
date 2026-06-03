@@ -1,0 +1,37 @@
+# GoldTrader Pro v4 — Python Dependencies
+# !! Python 3.11 REQUIRED — see .python-version !!
+# All packages below have pre-built binary wheels for Python 3.11.
+# Do NOT upgrade to Python 3.12+ without re-validating all wheel availability.
+
+# ── Web Framework ────────────────────────────────────────────
+fastapi==0.115.6
+uvicorn[standard]==0.34.0
+
+# ── Database ─────────────────────────────────────────────────
+sqlalchemy[asyncio]==2.0.37
+asyncpg==0.30.0
+alembic==1.14.0
+
+# ── Auth & Security ──────────────────────────────────────────
+bcrypt==4.2.1
+python-jose[cryptography]==3.3.0
+google-auth==2.38.0
+httpx==0.28.1
+
+# ── Validation (pydantic-core MUST have a wheel for Python 3.11) ──
+pydantic==2.10.6
+pydantic-settings==2.7.1
+email-validator==2.2.0
+
+# ── Excel ────────────────────────────────────────────────────
+openpyxl==3.1.5
+pandas==2.2.3
+numpy==1.26.4
+
+# ── Uploads & Utils ──────────────────────────────────────────
+python-multipart==0.0.20
+python-dotenv==1.0.1
+requests==2.32.5
+
+# ── Email (optional) ─────────────────────────────────────────
+aiosmtplib==3.0.2
