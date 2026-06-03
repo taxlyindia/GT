@@ -4201,6 +4201,23 @@ const GOOGLE_CLIENT_ID = '863366877040-e8bi45pfb3mo1ec03c395g8dbaatvke5.apps.goo
 })();
 const API = window._GT_API_BASE;  // e.g. '/gt' → fetch('/gt/api/auth/login')
 
+// ── toArr: normalise any API response to a plain array ────────────────────
+// The backend may return: [] | {items:[]} | {rows:[]} | {data:[]} | {suppliers:[]}
+// | {invoices:[]} | {payments:[]} | {advances:[]} | {entries:[]}
+// This helper always gives back a safe array — never throws.
+function toArr(r, hint) {
+  if (!r) return [];
+  if (Array.isArray(r)) return r;
+  // Try hint key first (e.g. 'suppliers', 'entries')
+  if (hint && Array.isArray(r[hint])) return r[hint];
+  // Common wrapper keys in order of priority
+  for (const k of ['items','rows','data','results','invoices','suppliers',
+                    'payments','advances','entries','customers','stock']) {
+    if (Array.isArray(r[k])) return r[k];
+  }
+  return [];
+}
+
 // ── Backend connectivity check ──────────────────────────────────────────────
 // Runs once on page load. If the backend is unreachable, shows a clear
 // "Cannot connect to backend" banner so users know why login fails with 404.
@@ -4472,7 +4489,7 @@ async function renderTenants() {
   const tbody = document.getElementById('ten-tbl-body');
   tbody.innerHTML = '<tr><td colspan="7" style="text-align:center;color:var(--muted);">Loading…</td></tr>';
   try {
-    const rows = await GET('/api/admin/tenants', true);
+    const rows = toArr(await GET('/api/admin/tenants', true));
     if (!rows.length) { tbody.innerHTML = '<tr><td colspan="7" style="text-align:center;color:var(--muted);padding:24px;">No tenants found</td></tr>'; return; }
     tbody.innerHTML = rows.map(t => {
       // Plan pill colour
@@ -4527,7 +4544,7 @@ async function renderAllUsers() {
   const tbody = document.getElementById('admin-users-tbody');
   tbody.innerHTML = '<tr><td colspan="8" style="text-align:center;color:var(--muted);">Loading…</td></tr>';
   try {
-    const rows = await GET('/api/admin/users', true);
+    const rows = toArr(await GET('/api/admin/users', true));
     tbody.innerHTML = rows.map(u => `
       <tr>
         <td><strong>${esc(u.username)}</strong></td>
@@ -4547,7 +4564,7 @@ async function renderGoogleRequests() {
   const alertEl = document.getElementById('g-req-alert');
   tbody.innerHTML = '<tr><td colspan="9" style="text-align:center;color:var(--muted);">Loading…</td></tr>';
   try {
-    const rows = await GET('/api/admin/google-requests', true);
+    const rows = toArr(await GET('/api/admin/google-requests', true));
     alertEl.style.display = 'none';
     const pending  = rows.filter(r => r.status==='pending').length;
     const expired  = rows.filter(r => r.status==='trial' && (r.days_left||0) <= 0).length;
@@ -4633,7 +4650,7 @@ async function renderBackups() {
   const tbody = document.getElementById('admin-bak-tbody');
   tbody.innerHTML = '<tr><td colspan="5" style="text-align:center;color:var(--muted);">Loading…</td></tr>';
   try {
-    const rows = await GET('/api/admin/backups', true);
+    const rows = toArr(await GET('/api/admin/backups', true));
     tbody.innerHTML = rows.map(t => `
       <tr>
         <td><strong>${esc(t.company_name)}</strong> <span class="mn">#${t.tenant_id}</span></td>
@@ -5318,7 +5335,7 @@ async function openNewInvoice() {
 
 async function loadCustomerDropdown() {
   try {
-    const custs = await GET('/api/customers/');
+    const custs = toArr(await GET('/api/customers/'));
     const sel = document.getElementById('if-cust-select');
     sel.innerHTML = '<option value="">— Type mobile below for new customer —</option>';
     custs.forEach(c => {
@@ -5409,7 +5426,7 @@ function getPuritiesForCategory(category) {
 async function loadStockForCategory(category) {
   // Re-fetch stock for the newly selected category and merge into _availableStock
   try {
-    const fresh = await GET('/api/stock/purity-options?category=' + encodeURIComponent(category));
+    const fresh = toArr(await GET('/api/stock/purity-options?category=' + encodeURIComponent(category)));
     // Remove old entries for this category, add fresh ones
     _availableStock = _availableStock.filter(s => s.category !== category);
     _availableStock.push(...fresh.map(x => ({...x, category})));
@@ -5520,7 +5537,7 @@ async function lookupCustomer() {
   const mob = v('if-mob');
   if (!/^\d{10}$/.test(mob)) return;
   try {
-    const custs = await GET('/api/customers/?q=' + mob);
+    const custs = toArr(await GET('/api/customers/?q=' + mob));
     const c = custs.find(x => x.mobile === mob);
     if (c) {
       set('if-name', c.name);
@@ -6007,7 +6024,7 @@ async function loadOutstandingInvoiceDropdown(selectId, customerMobile) {
   try {
     let url = '/api/invoices/?include_cancelled=false';
     if (customerMobile) url += '&mobile=' + customerMobile;
-    const invoices = await GET(url);
+    const invoices = toArr(await GET(url));
     const outstanding = invoices.filter(i => i.outstanding > 0 && i.status !== 'cancelled');
     sel.innerHTML = '<option value="">— Select invoice —</option>';
     outstanding.forEach(inv => {
@@ -6218,7 +6235,7 @@ async function openAdvanceModal() {
   if (sel) {
     sel.innerHTML = '<option value="">— Select existing customer —</option>';
     try {
-      const custs = await GET('/api/customers/');
+      const custs = toArr(await GET('/api/customers/'));
       custs.forEach(c => {
         const opt = document.createElement('option');
         opt.value = c.mobile;
@@ -6489,7 +6506,7 @@ async function saveOpeningBalance() {
   status.textContent = '⏳ Saving…';
   try {
     // Check if an Opening Balance entry already exists — delete it first
-    const all = await GET('/api/cash/');
+    const all = toArr(await GET('/api/cash/'), 'entries');
     const existing = all.find(e => e.description === 'Opening Balance' && e.type === 'cash_in');
     if (existing) {
       await DELETE('/api/cash/' + existing.id);
@@ -6563,7 +6580,8 @@ function loadCurrentReport() {
   const el = document.getElementById('rpt-content');
   el.innerHTML = '<div style="text-align:center;padding:32px;color:var(--muted);">Loading report…</div>';
   GET(route + '?' + params).then(data => {
-    el.innerHTML = renderReport(_currentReport, data);
+    try { el.innerHTML = renderReport(_currentReport, data || {}); }
+    catch(re) { el.innerHTML = `<div class="alert al-r">Render error: ${esc(re.message)}</div>`; }
   }).catch(e => { el.innerHTML = `<div class="alert al-r">Error: ${esc(e.message)}</div>`; });
 }
 
@@ -6970,8 +6988,11 @@ function renderReport(type, data) {
     </table></div>`;
   }
   if (type === 'custacct') {
-    const rows = data.rows || data || [];
+    const rows = toArr(data.rows != null ? data.rows : data);
     const tot  = data.totals || {};
+    // Backend uses 'grand' key; frontend expects 'grand_total'
+    if (tot.grand === undefined && tot.grand_total === undefined) tot.grand_total = 0;
+    if (tot.grand !== undefined && tot.grand_total === undefined) tot.grand_total = tot.grand;
     return `<div class="kpi-grid g4" style="margin-bottom:14px;">
       <div class="kpi"><div class="kl">Grand Total</div><div class="kv">${inr(tot.grand_total||0)}</div></div>
       <div class="kpi"><div class="kl">Total GST</div><div class="kv" style="color:var(--blue);">${inr((tot.cgst||0)+(tot.sgst||0)+(tot.igst||0))}</div></div>
@@ -7003,8 +7024,9 @@ function renderReport(type, data) {
     </table></div>`;
   }
   if (type === 'supacct') {
-    const rows = data.rows || data || [];
+    const rows = toArr(data.rows != null ? data.rows : data);
     const tot  = data.totals || {};
+    if (tot.grand !== undefined && tot.grand_total === undefined) tot.grand_total = tot.grand;
     return `<div class="kpi-grid g4" style="margin-bottom:14px;">
       <div class="kpi"><div class="kl">Grand Total</div><div class="kv">${inr(tot.grand_total||0)}</div></div>
       <div class="kpi"><div class="kl">Total GST</div><div class="kv" style="color:var(--blue);">${inr((tot.cgst||0)+(tot.sgst||0)+(tot.igst||0))}</div></div>
@@ -8348,7 +8370,7 @@ async function loadSupplierPayments() {
   tbody.innerHTML = loadingRow(8);
   try {
     const data = await GET('/api/suppliers/payments/');
-    const rows = data.payments || data || [];
+    const rows = toArr(data, 'payments');
     if (!rows.length) { tbody.innerHTML = noDataRow(8); return; }
     _supPayStore = {};
     rows.forEach(p => { _supPayStore[p.id] = p; });
@@ -8384,7 +8406,7 @@ async function loadOutstandingForPayment() {
   panel.style.display = '';
   try {
     const data = await GET('/api/suppliers/invoices/?mobile=' + encodeURIComponent(mobile));
-    const all  = Array.isArray(data) ? data : (data.invoices || []);
+    const all  = toArr(data, 'invoices');
     const invs = all.filter(inv => (parseFloat(inv.outstanding) || 0) > 0.005);
     if (!invs.length) {
       panel.style.display = 'none';
@@ -8508,7 +8530,7 @@ async function loadSupplierAdvances() {
   tbody.innerHTML = loadingRow(8);
   try {
     const data = await GET('/api/suppliers/advances/');
-    const rows = data.advances || data || [];
+    const rows = toArr(data, 'advances');
     if (!rows.length) { tbody.innerHTML = noDataRow(8); return; }
     _supAdvStore = {};
     rows.forEach(a => { _supAdvStore[a.id] = a; });
@@ -8545,7 +8567,7 @@ async function loadOutstandingForAdvance() {
   // outstanding panel is shown as informational reference only
   try {
     const data = await GET('/api/suppliers/invoices/?mobile=' + encodeURIComponent(mobile));
-    const all  = Array.isArray(data) ? data : (data.invoices || []);
+    const all  = toArr(data, 'invoices');
     const invs = all.filter(inv => (parseFloat(inv.outstanding) || 0) > 0.005);
     if (invs.length) {
       tbody.innerHTML = invs.map(inv => `
@@ -8916,7 +8938,7 @@ async function _runGlobalSearch(q) {
   // Search purchase invoices
   try {
     const sinvData = await GET('/api/suppliers/invoices/?limit=200');
-    const sinvs = Array.isArray(sinvData) ? sinvData : (sinvData.invoices || []);
+    const sinvs = toArr(sinvData, 'invoices');
     sinvs.filter(r =>
       (r.invoice_no||'').toLowerCase().includes(q) ||
       (r.supplier_name||'').toLowerCase().includes(q)
