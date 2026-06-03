@@ -5106,7 +5106,7 @@ async function loadDashboard() {
     let invRes = [];
     try {
       const _ir = await GET('/api/invoices/');
-      invRes = Array.isArray(_ir) ? _ir : (_ir && Array.isArray(_ir.items) ? _ir.items : []);
+      invRes = toArr(_ir);
     } catch(_) { invRes = []; }
     const recent = invRes.slice(0,8);
     document.getElementById('dash-inv-body').innerHTML = recent.map(inv => `
@@ -5237,7 +5237,7 @@ async function loadInvoices() {
   if (status) params.set('status', status);
   try {
     const _rowsRaw = await GET('/api/invoices/?' + params);
-    const rows = Array.isArray(_rowsRaw) ? _rowsRaw : (_rowsRaw && Array.isArray(_rowsRaw.items) ? _rowsRaw.items : []);
+    const rows = toArr(_rowsRaw);  // backend returns plain array list[InvoiceOut]
     tbody.innerHTML = rows.length ? rows.map(inv => `
       <tr>
         <td class="mn" onclick="previewInvoice(${inv.id})" style="cursor:pointer;" title="Click to preview">${esc(inv.invoice_no)}</td>
@@ -5842,7 +5842,7 @@ async function loadCustomers() {
   const params = q ? '?q=' + encodeURIComponent(q) : '';
   try {
     const _cr = await GET('/api/customers/' + params);
-    const rows = (Array.isArray(_cr) ? _cr : (_cr && Array.isArray(_cr.items) ? _cr.items : (_cr && Array.isArray(_cr.rows) ? _cr.rows : [])));
+    const rows = toArr(_cr);  // backend returns plain array list[CustomerOut]
     tbody.innerHTML = rows.length ? rows.map(c => `
       <tr>
         <td class="mn" onclick="openLedger('${esc(c.mobile)}')">${esc(c.mobile)}</td>
@@ -5965,7 +5965,7 @@ async function loadPayments() {
   if (to)   params.set('to_date', to);
   try {
     const res = await GET('/api/payments/?' + params);
-    const rows = Array.isArray(res) ? res : (res.rows || []);
+    const rows = toArr(res, 'rows');  // backend returns {rows:[...], total:N}
     _paymentStore = {};
     rows.forEach(p => { _paymentStore[p.id] = p; });
     tbody.innerHTML = rows.length ? rows.map(p => `
@@ -6197,7 +6197,7 @@ async function loadAdvances() {
   tbody.innerHTML = loadingRow(8);
   try {
     const _ar = await GET('/api/advances/');
-    const rows = (Array.isArray(_ar) ? _ar : (_ar && Array.isArray(_ar.items) ? _ar.items : (_ar && Array.isArray(_ar.rows) ? _ar.rows : [])));
+    const rows = toArr(_ar);  // backend returns plain array
     _advanceStore = {};
     rows.forEach(a => { _advanceStore[a.id] = a; });
     tbody.innerHTML = rows.length ? rows.map(a => `
@@ -6343,7 +6343,7 @@ async function loadStock() {
   tbody.innerHTML = loadingRow(6);
   try {
     const _sr = await GET('/api/stock/');
-    const rows = (Array.isArray(_sr) ? _sr : (_sr && Array.isArray(_sr.items) ? _sr.items : (_sr && Array.isArray(_sr.rows) ? _sr.rows : [])));
+    const rows = toArr(_sr);  // backend returns plain array
     tbody.innerHTML = rows.length ? rows.map(s => `
       <tr>
         <td><span class="pill ${s.category==='Gold'?'pg':s.category==='Silver'?'pb':'pm'}">${esc(s.category)}</span></td>
@@ -6461,7 +6461,7 @@ async function loadCash() {
     ]);
     // Normalize entries to array (API always returns array, but guard defensively)
     // entries comes from Promise.all - reassign to normalized form
-    const _cashEntries = Array.isArray(entries) ? entries : (entries && Array.isArray(entries.items) ? entries.items : []);
+    const _cashEntries = toArr(entries);  // backend returns plain array
     // Opening balance: fetched from server as earliest cash_in with description 'Opening Balance'
     const obEntry = _cashEntries.find(e => e.description === 'Opening Balance' && e.type === 'cash_in');
     const obAmt   = obEntry ? parseFloat(obEntry.amount) : 0;
@@ -6990,9 +6990,6 @@ function renderReport(type, data) {
   if (type === 'custacct') {
     const rows = toArr(data.rows != null ? data.rows : data);
     const tot  = data.totals || {};
-    // Backend uses 'grand' key; frontend expects 'grand_total'
-    if (tot.grand === undefined && tot.grand_total === undefined) tot.grand_total = 0;
-    if (tot.grand !== undefined && tot.grand_total === undefined) tot.grand_total = tot.grand;
     return `<div class="kpi-grid g4" style="margin-bottom:14px;">
       <div class="kpi"><div class="kl">Grand Total</div><div class="kv">${inr(tot.grand_total||0)}</div></div>
       <div class="kpi"><div class="kl">Total GST</div><div class="kv" style="color:var(--blue);">${inr((tot.cgst||0)+(tot.sgst||0)+(tot.igst||0))}</div></div>
@@ -7026,7 +7023,6 @@ function renderReport(type, data) {
   if (type === 'supacct') {
     const rows = toArr(data.rows != null ? data.rows : data);
     const tot  = data.totals || {};
-    if (tot.grand !== undefined && tot.grand_total === undefined) tot.grand_total = tot.grand;
     return `<div class="kpi-grid g4" style="margin-bottom:14px;">
       <div class="kpi"><div class="kl">Grand Total</div><div class="kv">${inr(tot.grand_total||0)}</div></div>
       <div class="kpi"><div class="kl">Total GST</div><div class="kv" style="color:var(--blue);">${inr((tot.cgst||0)+(tot.sgst||0)+(tot.igst||0))}</div></div>
@@ -7973,10 +7969,7 @@ async function loadSuppliers() {
   tbody.innerHTML = loadingRow(6);
   try {
     const _supRaw = await GET('/api/suppliers/');
-    const _supArr = Array.isArray(_supRaw) ? _supRaw
-                  : Array.isArray(_supRaw?.suppliers) ? _supRaw.suppliers
-                  : Array.isArray(_supRaw?.rows) ? _supRaw.rows
-                  : [];
+    const _supArr = toArr(_supRaw);  // backend returns plain array
     _supplierStore = {};
     _supArr.forEach(s => { _supplierStore[s.mobile] = s; });
     const rows = Object.values(_supplierStore);
@@ -8075,7 +8068,7 @@ async function loadSupplierInvoices() {
     if (from) p.set('from_date', from);
     if (to)   p.set('to_date', to);
     const data = await GET('/api/suppliers/invoices/?' + p);
-    const rows = Array.isArray(data) ? data : (data.invoices || []);
+    const rows = toArr(data);  // backend returns plain array
     if (!rows.length) { tbody.innerHTML = noDataRow(11); return; }
     tbody.innerHTML = rows.map(inv => {
       const gst = (parseFloat(inv.cgst)||0)+(parseFloat(inv.sgst)||0)+(parseFloat(inv.igst)||0);
