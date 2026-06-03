@@ -4179,18 +4179,27 @@ const GOOGLE_CLIENT_ID = '863366877040-e8bi45pfb3mo1ec03c395g8dbaatvke5.apps.goo
 //   localStorage.setItem('gt_api_url', 'https://your-backend.onrender.com')
 //   then refresh the page.
 (function() {
-  const stored  = localStorage.getItem('gt_api_url');
-  const injected = (typeof window.GT_API_URL !== 'undefined') ? window.GT_API_URL : null;
-  let detected = '';
+  // ── API Base URL ──────────────────────────────────────────────────────────
+  // The app is served by FastAPI at /gt on Hostinger.
+  // All API calls must be prefixed with /gt so Nginx routes them correctly.
+  //
+  // Priority:
+  //   1. localStorage 'gt_api_url'  — manual override (dev/debug use only)
+  //   2. file:// protocol           — local dev: use localhost:8011 directly
+  //   3. Default                    — /gt  (production: Hostinger subpath)
+  //
+  // IMPORTANT: clear any stale localStorage override if login is broken:
+  //   localStorage.removeItem('gt_api_url')  then refresh
+  //
+  const stored = localStorage.getItem('gt_api_url');
   if (location.protocol === 'file:') {
-    detected = 'http://localhost:8011';
+    window._GT_API_BASE = stored || 'http://localhost:8011';
+  } else {
+    // On http/https — always use /gt unless manually overridden
+    window._GT_API_BASE = stored || '/gt';
   }
-  // When served by FastAPI (http/https), use same-origin (empty string).
-  // The app may be mounted at a subpath (e.g. /gt) — relative API calls
-  // like /api/... work correctly because the browser resolves them from origin.
-  window._GT_API_BASE = stored || injected || detected || '/gt';
 })();
-const API = window._GT_API_BASE;  // resolved API base URL — hardcoded to /gt for Hostinger
+const API = window._GT_API_BASE;  // e.g. '/gt' → fetch('/gt/api/auth/login')
 
 // ── Backend connectivity check ──────────────────────────────────────────────
 // Runs once on page load. If the backend is unreachable, shows a clear
