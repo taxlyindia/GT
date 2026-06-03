@@ -187,6 +187,16 @@ app.include_router(admin.router,      prefix="/api/admin",      tags=["Admin"])
 app.include_router(suppliers.router,  prefix="/api/suppliers",  tags=["Suppliers"])
 
 
+# ── Helper: serve HTML with no-cache headers ─────────────────
+def serve_html(path: str):
+    """Serve an HTML file with Cache-Control: no-cache so browsers always fetch fresh."""
+    from fastapi.responses import FileResponse as _FR
+    resp = _FR(str(path), media_type="text/html")
+    resp.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
+    resp.headers["Pragma"] = "no-cache"
+    resp.headers["Expires"] = "0"
+    return resp
+
 # ── Health & Config endpoints ──────────────────────────────────
 @app.get("/health")
 async def health():
@@ -206,19 +216,19 @@ async def serve_google_callback():
     """Serve the Google OAuth2 callback page for the popup flow."""
     cb = FRONTEND_DIR / "google-callback.html"
     if cb.exists():
-        return FileResponse(str(cb), media_type="text/html")
-    return FileResponse(str(INDEX_HTML), media_type="text/html")
+        return serve_html(cb)
+    return serve_html(INDEX_HTML)
 
 @app.get("/", response_class=FileResponse)
 async def serve_root():
     """Serve the frontend SPA."""
-    return FileResponse(str(INDEX_HTML), media_type="text/html")
+    return serve_html(INDEX_HTML)
 
 @app.get("/gt", response_class=FileResponse)
 @app.get("/gt/", response_class=FileResponse)
 async def serve_root_gt():
     """Serve SPA when accessed at /gt subpath directly (Hostinger)."""
-    return FileResponse(str(INDEX_HTML), media_type="text/html")
+    return serve_html(INDEX_HTML)
 
 @app.api_route("/{full_path:path}", methods=["GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS"])
 async def serve_frontend(full_path: str, request: Request):
@@ -230,4 +240,4 @@ async def serve_frontend(full_path: str, request: Request):
     # Never serve HTML for API paths — return 404 so the real error is clear
     if full_path.startswith("api/") or full_path.startswith("gt/api/"):
         raise HTTPException(status_code=404, detail=f"API route not found: /{full_path}")
-    return FileResponse(str(INDEX_HTML), media_type="text/html")
+    return serve_html(INDEX_HTML)
